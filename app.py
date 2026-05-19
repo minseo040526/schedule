@@ -762,25 +762,6 @@ if st.button("GA로 월간 스케줄 생성", type="primary", use_container_widt
 
     # ── GA 수렴 그래프 ────────────────────────────────────────────────────
     with st.expander("📈 GA 수렴 그래프", expanded=True):
-        import plotly.graph_objects as go
-
-        gens = list(range(1, len(history_best) + 1))
-        fig = go.Figure()
-
-        fig.add_trace(go.Scatter(
-            x=gens, y=history_avg,
-            name="세대 평균 점수",
-            line=dict(color="rgba(108,99,255,0.5)", width=1.5, dash="dot"),
-            fill=None,
-        ))
-        fig.add_trace(go.Scatter(
-            x=gens, y=history_best,
-            name="최고 점수",
-            line=dict(color="#6c63ff", width=2.5),
-            fill="tonexty",
-            fillcolor="rgba(108,99,255,0.08)",
-        ))
-        # base 라인
         n_emps  = max(len(employees), 1)
         max_req = max(required_staff.values())
         base_score = (
@@ -789,25 +770,13 @@ if st.button("GA로 월간 스케줄 생성", type="primary", use_container_widt
             + n_emps * last_day * 500
             + last_day * 30
         )
-        fig.add_hline(
-            y=base_score,
-            line_dash="dash", line_color="rgba(0,212,170,0.5)",
-            annotation_text="이론상 최고점(base)",
-            annotation_position="top left",
-        )
 
-        fig.update_layout(
-            template="plotly_dark",
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            margin=dict(l=10, r=10, t=30, b=10),
-            height=320,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-            xaxis=dict(title="세대", gridcolor="rgba(108,99,255,0.1)"),
-            yaxis=dict(title="적합도 점수", gridcolor="rgba(108,99,255,0.1)"),
-            hovermode="x unified",
-        )
-        st.plotly_chart(fig, use_container_width=True)
+        chart_df = pd.DataFrame({
+            "최고 점수":   history_best,
+            "평균 점수":   history_avg,
+            "이론상 최고점": [base_score] * len(history_best),
+        })
+        st.line_chart(chart_df, use_container_width=True, height=300)
 
         col_a, col_b, col_c, col_d = st.columns(4)
         col_a.metric("초기 점수",  f"{history_best[0]:,.0f}")
@@ -817,43 +786,43 @@ if st.button("GA로 월간 스케줄 생성", type="primary", use_container_widt
         col_d.metric("개선율",     f"{improve_pct:.1f}%")
 
     # ── 4. 월간 캘린더 ───────────────────────────────────────────────────
-    with st.expander("📅 4. 월간 캘린더 스케줄", expanded=True):
-        st.caption("★ 월급제  ◆ 시급제")
-        first_wd, _ = calendar.monthrange(year, month)
-        rows, week  = [], [""] * first_wd
-        for d in dates:
-            o = ", ".join(name_with_marker(n) for n in best_schedule[d]["오픈"]) or "-"
-            c = ", ".join(name_with_marker(n) for n in best_schedule[d]["마감"]) or "-"
-            week.append(f"{d.day}일\n오픈: {o}\n마감: {c}")
-            if len(week) == 7:
-                rows.append(week); week = []
-        if week:
-            rows.append(week + [""] * (7 - len(week)))
-        st.dataframe(pd.DataFrame(rows, columns=WEEKDAYS), use_container_width=True, height=500)
+    st.markdown('<div class="section-title">4. 월간 캘린더 스케줄</div>', unsafe_allow_html=True)
+    st.caption("★ 월급제  ◆ 시급제")
+    first_wd, _ = calendar.monthrange(year, month)
+    rows, week  = [], [""] * first_wd
+    for d in dates:
+        o = ", ".join(name_with_marker(n) for n in best_schedule[d]["오픈"]) or "-"
+        c = ", ".join(name_with_marker(n) for n in best_schedule[d]["마감"]) or "-"
+        week.append(f"{d.day}일\n오픈: {o}\n마감: {c}")
+        if len(week) == 7:
+            rows.append(week); week = []
+    if week:
+        rows.append(week + [""] * (7 - len(week)))
+    st.dataframe(pd.DataFrame(rows, columns=WEEKDAYS), use_container_width=True, height=500)
 
     # ── 5. 상세 스케줄표 ─────────────────────────────────────────────────
-    with st.expander("📋 5. 상세 스케줄표", expanded=False):
-        def highlight_shortage(row):
-            styles = [""] * len(row)
-            cols = list(row.index)
-            if row.get("오픈 부족", 0) > 0:
-                styles[cols.index("오픈 부족")] = "background-color:#fee2e2; color:#b91c1c; font-weight:bold"
-            if row.get("마감 부족", 0) > 0:
-                styles[cols.index("마감 부족")] = "background-color:#fee2e2; color:#b91c1c; font-weight:bold"
-            return styles
-        st.dataframe(result_df.style.apply(highlight_shortage, axis=1), use_container_width=True)
+    st.markdown('<div class="section-title">5. 상세 스케줄표</div>', unsafe_allow_html=True)
+    def highlight_shortage(row):
+        styles = [""] * len(row)
+        cols = list(row.index)
+        if row.get("오픈 부족", 0) > 0:
+            styles[cols.index("오픈 부족")] = "background-color:#fee2e2; color:#b91c1c; font-weight:bold"
+        if row.get("마감 부족", 0) > 0:
+            styles[cols.index("마감 부족")] = "background-color:#fee2e2; color:#b91c1c; font-weight:bold"
+        return styles
+    st.dataframe(result_df.style.apply(highlight_shortage, axis=1), use_container_width=True)
 
     # ── 6. 직원별 근무 분석 ──────────────────────────────────────────────
-    with st.expander("👥 6. 직원별 근무 분석", expanded=False):
-        def style_by_type(row):
-            if row["유형"] == "월급제":
-                bg = "background-color:#dbeafe; color:#1e40af"
-            else:
-                bg = "background-color:#dcfce7; color:#166534"
-            styles = [bg] * len(row)
-            cols = list(row.index)
-            if row["실제근무일수"] != row["목표근무일수"]:
-                styles[cols.index("실제근무일수")] = bg + "; font-weight:bold; text-decoration:underline"
-            return styles
-        st.dataframe(analysis_df.style.apply(style_by_type, axis=1), use_container_width=True)
-        st.caption("🟦 월급제  🟩 시급제  |  실제근무일수 밑줄 = 목표 불일치")
+    st.markdown('<div class="section-title">6. 직원별 근무 분석</div>', unsafe_allow_html=True)
+    def style_by_type(row):
+        if row["유형"] == "월급제":
+            bg = "background-color:#dbeafe; color:#1e40af"
+        else:
+            bg = "background-color:#dcfce7; color:#166534"
+        styles = [bg] * len(row)
+        cols = list(row.index)
+        if row["실제근무일수"] != row["목표근무일수"]:
+            styles[cols.index("실제근무일수")] = bg + "; font-weight:bold; text-decoration:underline"
+        return styles
+    st.dataframe(analysis_df.style.apply(style_by_type, axis=1), use_container_width=True)
+    st.caption("🟦 월급제  🟩 시급제  |  실제근무일수 밑줄 = 목표 불일치")
