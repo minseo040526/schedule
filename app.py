@@ -379,18 +379,43 @@ def create_individual():
     return schedule
 
 def repair_schedule(schedule):
-    """위반 배정 제거 후 부족 인원 보충"""
+    """
+    1단계: 하드 제약 위반(휴무요청, 가용불가) 제거
+    2단계: 근무 횟수 집계 후 초과분 제거 (전체 집계 기준 → 순서 의존성 없음)
+    3단계: 부족 인원 보충
+    """
     lookup = emp_by_name if emp_by_name else {e["이름"]: e for e in employees}
+
+    # 1단계: 하드 제약 위반만 제거
+    for d in dates:
+        for s in SHIFTS:
+            schedule[d][s] = [
+                name for name in schedule[d][s]
+                if is_available(lookup[name], d, s)
+            ]
+
+    # 2단계: 전체 근무 횟수 집계 후 초과분 제거
+    # 월급제: 정확히 target, 시급제: target 이하
+    wc = {name: 0 for name in lookup}
+    for d in dates:
+        for s in SHIFTS:
+            for name in schedule[d][s]:
+                wc[name] += 1
+
     for d in dates:
         for s in SHIFTS:
             cleaned = []
             for name in schedule[d][s]:
                 emp = lookup[name]
-                if is_available(emp, d, s) and work_count(schedule, name) <= get_target_work(emp):
+                target = get_target_work(emp)
+                excess = wc[name] - target
+                if excess > 0:
+                    wc[name] -= 1  # 제거하면 횟수 감소
+                else:
                     cleaned.append(name)
             schedule[d][s] = cleaned[:required_staff[s]]
 
-    # 부족 보충
+    # 3단계: 부족 보충 (can_assign이 내부적으로 work_count 호출하므로 정확)
     slots = [(d, s) for d in dates for s in SHIFTS]
     random.shuffle(slots)
     for d, s in slots:
@@ -427,9 +452,9 @@ def fitness(schedule):
             assigned = schedule[d][s]
             diff = len(assigned) - required_staff[s]
             if diff < 0:
-                score += diff * 10000   # 부족
+                score -= abs(diff) * 10000   # 부족
             elif diff > 0:
-                score -= diff * 500     # 초과
+                score -= diff * 500          # 초과
             for name in assigned:
                 wc[name] += 1
 
