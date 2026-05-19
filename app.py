@@ -24,9 +24,6 @@ shifts = ["오픈", "마감"]
 weekdays = ["월", "화", "수", "목", "금", "토", "일"]
 
 
-# =====================
-# DB
-# =====================
 def init_db():
     conn = sqlite3.connect("schedule.db")
     c = conn.cursor()
@@ -175,15 +172,12 @@ def clear_employees(store_name):
 
 init_db()
 
-
-# =====================
-# Login
-# =====================
 if "login" not in st.session_state:
     st.session_state.login = False
 
 if "store_name" not in st.session_state:
     st.session_state.store_name = None
+
 
 if not st.session_state.login:
     st.markdown('<div class="main-title">GA 기반 월간 근무 스케줄 자동 생성 시스템</div>', unsafe_allow_html=True)
@@ -220,9 +214,6 @@ if not st.session_state.login:
     st.stop()
 
 
-# =====================
-# Main
-# =====================
 st.markdown('<div class="main-title">GA 기반 월간 근무 스케줄 자동 생성 시스템</div>', unsafe_allow_html=True)
 st.markdown(f'<span class="store-badge">현재 매장: {st.session_state.store_name}</span>', unsafe_allow_html=True)
 
@@ -307,9 +298,6 @@ def calendar_dayoff_selector(dates, year, month, key_prefix, default_selected=No
     return selected_days
 
 
-# =====================
-# Employee Form
-# =====================
 st.sidebar.header("직원 등록 / 수정")
 
 employees = st.session_state.employees
@@ -409,9 +397,6 @@ if st.sidebar.button("직원 삭제", use_container_width=True):
         st.sidebar.warning("삭제할 직원을 선택해주세요.")
 
 
-# =====================
-# Employee Table
-# =====================
 st.markdown('<div class="section-title">2. 등록된 직원</div>', unsafe_allow_html=True)
 
 employees = st.session_state.employees
@@ -438,9 +423,6 @@ if st.button("현재 매장 직원 전체 초기화"):
     st.rerun()
 
 
-# =====================
-# Required Staff
-# =====================
 st.markdown('<div class="section-title">3. 필요 인원 설정</div>', unsafe_allow_html=True)
 
 col1, col2, col3 = st.columns(3)
@@ -452,7 +434,7 @@ with col2:
     close_required = st.number_input("마감 필요 인원", 1, 20, 2)
 
 with col3:
-    generations = st.slider("GA 반복 세대 수", 50, 1000, 500)
+    generations = st.slider("GA 반복 세대 수", 30, 300, 120)
 
 required_staff = {
     "오픈": open_required,
@@ -462,9 +444,6 @@ required_staff = {
 employee_names = [e["이름"] for e in employees]
 
 
-# =====================
-# Schedule Helpers
-# =====================
 def is_available(emp, work_date, shift):
     weekday = get_weekday(work_date)
 
@@ -561,15 +540,10 @@ def max_consecutive_work_days(work_days):
 def create_individual():
     schedule = create_empty_schedule()
 
-    all_slots = []
+    slots = [(d, shift) for d in dates for shift in shifts]
+    random.shuffle(slots)
 
-    for d in dates:
-        for shift in shifts:
-            all_slots.append((d, shift))
-
-    random.shuffle(all_slots)
-
-    for d, shift in all_slots:
+    for d, shift in slots:
         required = required_staff[shift]
 
         candidates = [
@@ -578,7 +552,6 @@ def create_individual():
         ]
 
         random.shuffle(candidates)
-
         selected = candidates[:required]
         schedule[d][shift] = [emp["이름"] for emp in selected]
 
@@ -594,17 +567,13 @@ def repair_schedule(schedule):
             for name in schedule[d][shift]:
                 emp = next(e for e in employees if e["이름"] == name)
 
-                if can_assign(create_schedule_without(schedule, d, shift, name), emp, d, shift):
+                if is_available(emp, d, shift):
                     cleaned.append(name)
 
             schedule[d][shift] = cleaned[:required_staff[shift]]
 
-    # 부족 인원 채우기
-    slots = []
-    for d in dates:
-        for shift in shifts:
-            slots.append((d, shift))
-
+    # 부족한 인원 채우기
+    slots = [(d, shift) for d in dates for shift in shifts]
     random.shuffle(slots)
 
     for d, shift in slots:
@@ -625,20 +594,6 @@ def repair_schedule(schedule):
     return schedule
 
 
-def create_schedule_without(schedule, d, shift, name):
-    temp = {}
-
-    for day in dates:
-        temp[day] = {}
-        for s in shifts:
-            temp[day][s] = schedule[day][s][:]
-
-    if name in temp[d][shift]:
-        temp[d][shift].remove(name)
-
-    return temp
-
-
 def fitness(schedule):
     score = 0
     work_count = {name: 0 for name in employee_names}
@@ -657,13 +612,11 @@ def fitness(schedule):
             for name in assigned:
                 emp = next(e for e in employees if e["이름"] == name)
 
-                # 여기는 안전장치입니다. 실제로는 후보에서 제외됩니다.
                 if not is_available(emp, d, shift):
                     score -= 100000
 
                 work_count[name] += 1
 
-    # 월급제는 목표 근무일수와 실제 근무일수가 같아야 함
     for emp in employees:
         name = emp["이름"]
         target = get_target_work_count(emp)
@@ -675,7 +628,6 @@ def fitness(schedule):
             if actual > target:
                 score -= (actual - target) * 10000
 
-    # 마감 후 다음날 오픈 최소화
     for i in range(len(dates) - 1):
         today = dates[i]
         tomorrow = dates[i + 1]
@@ -684,7 +636,6 @@ def fitness(schedule):
             if name in schedule[today]["마감"] and name in schedule[tomorrow]["오픈"]:
                 score -= 1000
 
-    # 연속 근무 5일 초과 최소화
     for name in employee_names:
         work_days = get_work_days(schedule, name)
         max_consecutive = max_consecutive_work_days(work_days)
@@ -710,7 +661,7 @@ def crossover(parent1, parent2):
     return repair_schedule(child)
 
 
-def mutate(schedule, mutation_rate=0.15):
+def mutate(schedule, mutation_rate=0.05):
     for d in dates:
         for shift in shifts:
             if random.random() < mutation_rate:
@@ -730,14 +681,13 @@ def mutate(schedule, mutation_rate=0.15):
 
 
 def run_ga():
-    population_size = 100
+    population_size = 30
     population = [repair_schedule(create_individual()) for _ in range(population_size)]
 
     best_schedule = None
     best_score = -999999999999
 
     for _ in range(generations):
-        population = [repair_schedule(individual) for individual in population]
         population = sorted(population, key=fitness, reverse=True)
 
         current_score = fitness(population[0])
@@ -746,10 +696,10 @@ def run_ga():
             best_score = current_score
             best_schedule = population[0]
 
-        next_generation = population[:20]
+        next_generation = population[:8]
 
         while len(next_generation) < population_size:
-            parent1, parent2 = random.sample(population[:40], 2)
+            parent1, parent2 = random.sample(population[:15], 2)
             child = crossover(parent1, parent2)
             child = mutate(child)
             next_generation.append(child)
@@ -786,9 +736,6 @@ def make_calendar_df(schedule):
     return pd.DataFrame(calendar_rows, columns=weekdays)
 
 
-# =====================
-# Run
-# =====================
 if st.button("GA로 월간 스케줄 생성", type="primary", use_container_width=True):
     with st.spinner("유전 알고리즘으로 최적 스케줄을 탐색 중입니다..."):
         best_schedule, best_score = run_ga()
