@@ -329,20 +329,22 @@ required_staff = {"오픈": open_required, "마감": close_required}
 # GA 로직
 # ─────────────────────────────────────────────
 
+# 이름 → 직원 dict
+emp_by_name: dict = {}
+
+def build_emp_index():
+    global emp_by_name
+    emp_by_name = {e["이름"]: e for e in employees}
+
 def get_target_work(emp):
-    """목표 근무일수 (하드 제약 기준)"""
+    """목표 근무일수"""
     if emp["직원유형"] == "월급제":
         return last_day - emp["월휴무개수"]
     return emp["월최대근무횟수"]
 
 def is_available(emp, work_date, shift):
-    """
-    하드 제약:
-      - 휴무요청일은 절대 배정 불가
-      - 가능 근무 외 시프트 불가
-      - 시급제: 가능 요일 외 불가
-    """
-    if work_date in emp["휴무요청"]:          # ← 하드 제약
+    """하드 제약: 휴무요청일 / 불가 시프트 / 시급제 불가 요일"""
+    if work_date in emp["휴무요청"]:
         return False
     if shift not in emp["가능근무"]:
         return False
@@ -350,126 +352,101 @@ def is_available(emp, work_date, shift):
         return False
     return True
 
-def work_count(schedule, name):
-    """분석/fitness용 — 날짜 기준 근무일수"""
-    return sum(1 for d in dates if any(name in schedule[d][s] for s in SHIFTS))
-
-def can_assign_wc(wc, emp, work_date, shift, schedule):
-    """wc dict를 직접 받아 O(1) 판단 (create_individual / repair 내부용)"""
-    if not is_available(emp, work_date, shift):
-        return False
-    if any(emp["이름"] in schedule[work_date][s] for s in SHIFTS):
-        return False
-    if wc[emp["이름"]] >= get_target_work(emp):
-        return False
-    return True
-
 def empty_schedule():
     return {d: {s: [] for s in SHIFTS} for d in dates}
 
+def calc_wc(schedule):
+    """날짜 기준 근무일수 집계 — 같은 날 오픈+마감이어도 1일"""
+    wc = {e["이름"]: 0 for e in employees}
+    for d in dates:
+        worked = set()
+        for s in SHIFTS:
+            for name in schedule[d][s]:
+                worked.add(name)
+        for name in worked:
+            wc[name] += 1
+    return wc
+
+def work_count(schedule, name):
+    """분석/결과 출력용"""
+    return sum(1 for d in dates if any(name in schedule[d][s] for s in SHIFTS))
+
 def create_individual():
+    """
+    날짜 순서가 아닌 날짜를 셔플해서 배정.
+    wc를 직접 추적해 목표치 초과 배정을 원천 차단.
+    """
     schedule = empty_schedule()
     wc = {e["이름"]: 0 for e in employees}
-    slots = [(d, s) for d in dates for s in SHIFTS]
-    random.shuffle(slots)
-    for d, s in slots:
-        candidates = [e for e in employees if can_assign_wc(wc, e, d, s, schedule)]
-        random.shuffle(candidates)
-        selected = candidates[:required_staff[s]]
-        schedule[d][s] = [e["이름"] for e in selected]
-        for e in selected:
-            # 당일 처음 배정될 때만 wc 증가
-            in_other = any(e["이름"] in schedule[d][sx] for sx in SHIFTS if sx != s)
-            if not in_other:
+    day_order = list(dates)
+    random.shuffle(day_order)
+    for d in day_order:
+        for s in SHIFTS:
+            candidates = [
+                e for e in employees
+                if is_available(e, d, s)
+                and wc[e["이름"]] < get_target_work(e)
+                and not any(e["이름"] in schedule[d][sx] for sx in SHIFTS)
+            ]
+            random.shuffle(candidates)
+            for e in candidates[:required_staff[s]]:
+                schedule[d][s].append(e["이름"])
                 wc[e["이름"]] += 1
     return schedule
 
 def repair_schedule(schedule):
     """
-    1단계: 하드 제약 위반(휴무요청/가용불가) 제거
-    2단계: 날짜 기준 근무일수 집계 후 초과분 제거
-    3단계: 동일 wc dict 유지하면서 부족 인원 보충
-    → wc를 단일 진실 공급원으로 사용해 work_count() 재순회 방지
+    1단계 — 하드 제약 위반 제거 (휴무요청, 불가 시프트/요일)
+    2단계 — 날짜 기준 wc 재집계 후 초과분 제거
+    3단계 — wc 추적하며 부족 인원 보충
     """
     lookup = emp_by_name if emp_by_name else {e["이름"]: e for e in employees}
 
-    # 1단계: 하드 제약 위반 제거
+    # 1단계
     for d in dates:
         for s in SHIFTS:
             schedule[d][s] = [
                 name for name in schedule[d][s]
                 if is_available(lookup[name], d, s)
             ]
-        # 당일 오픈+마감 중복 배정 제거
-        today_assigned = set()
-        for s in SHIFTS:
-            deduped = []
-            for name in schedule[d][s]:
-                if name not in today_assigned:
-                    deduped.append(name)
-                    today_assigned.add(name)
-            schedule[d][s] = deduped
 
-    # 2단계: 날짜 기준 근무일수 집계 (오픈+마감 같은 날이면 1로 카운트)
-    wc = {name: 0 for name in lookup}
-    for d in dates:
-        worked_today = set()
-        for s in SHIFTS:
-            for name in schedule[d][s]:
-                worked_today.add(name)
-        for name in worked_today:
-            wc[name] += 1
+    # 2단계: 날짜 기준 wc 집계
+    wc = calc_wc(schedule)
 
-    # 초과분 제거 (날짜 역순으로 제거해 앞쪽 근무 최대한 보존)
+    # 초과분 제거: 역순으로 돌며 초과한 직원을 슬롯에서 제거
     for d in reversed(dates):
         for s in SHIFTS:
-            cleaned = []
+            kept = []
             for name in schedule[d][s]:
                 target = get_target_work(lookup[name])
                 if wc[name] > target:
-                    # 이 날 다른 시프트에도 없으면 일수 감소
-                    other_shifts = [sx for sx in SHIFTS if sx != s]
-                    in_other = any(name in schedule[d][sx] for sx in other_shifts)
-                    if not in_other:
+                    # 이 날 해당 name이 다른 시프트에 없을 때만 wc 감소
+                    other_today = any(name in schedule[d][sx] for sx in SHIFTS if sx != s)
+                    if not other_today:
                         wc[name] -= 1
-                    # schedule에서 제거
+                    # 어떤 경우든 이 슬롯에서는 제거
                 else:
-                    cleaned.append(name)
-            schedule[d][s] = cleaned[:required_staff[s]]
+                    kept.append(name)
+            schedule[d][s] = kept
 
-    # 3단계: 부족 보충 — wc dict를 직접 관리해 work_count() 재순회 없이 정확하게
+    # 3단계: 부족 보충 (wc 직접 추적)
     slots = [(d, s) for d in dates for s in SHIFTS]
     random.shuffle(slots)
     for d, s in slots:
         while len(schedule[d][s]) < required_staff[s]:
-            # wc 기반으로 후보 필터 (하드 제약 + 목표치 미달 + 당일 미배정)
-            candidates = []
-            for emp in employees:
-                name = emp["이름"]
-                if not is_available(emp, d, s):
-                    continue
-                if any(name in schedule[d][sx] for sx in SHIFTS):
-                    continue  # 당일 이미 배정
-                if wc[name] >= get_target_work(emp):
-                    continue  # 목표치 이미 달성
-                candidates.append(emp)
+            candidates = [
+                e for e in employees
+                if is_available(e, d, s)
+                and not any(e["이름"] in schedule[d][sx] for sx in SHIFTS)
+                and wc[e["이름"]] < get_target_work(e)
+            ]
             if not candidates:
                 break
             random.shuffle(candidates)
             chosen = candidates[0]["이름"]
             schedule[d][s].append(chosen)
-            # 당일 처음 배정되는 경우에만 wc 증가
-            in_other = any(chosen in schedule[d][sx] for sx in SHIFTS if sx != s)
-            if not in_other:
-                wc[chosen] += 1
+            wc[chosen] += 1
     return schedule
-
-# 이름 → 직원 dict (매 함수 호출마다 linear search 방지)
-emp_by_name: dict = {}
-
-def build_emp_index():
-    global emp_by_name
-    emp_by_name = {e["이름"]: e for e in employees}
 
 def max_consecutive(schedule, name):
     work_set = {d for d in dates if any(name in schedule[d][s] for s in SHIFTS)}
@@ -481,34 +458,34 @@ def max_consecutive(schedule, name):
     return max_c
 
 def fitness(schedule):
+    """
+    점수 기준:
+    - 인원 부족: -5000/명/일 (하드 제약이지만 불가피한 경우 대비)
+    - 인원 초과: -300/명/일
+    - 마감→다음날오픈: -500/건
+    - 연속근무 5일 초과: -2000/일
+    - 근무분산 표준편차: -10
+    월급제 근무일수는 repair_schedule에서 하드 제약으로 보장하므로 fitness 페널티 없음.
+    """
     score = 0
-    # 근무 횟수를 한 번에 집계
-    wc = {name: 0 for name in emp_by_name}
+    # 날짜 기준 wc (fitness에서도 날짜 기준 사용)
+    wc = calc_wc(schedule)
+
     for d in dates:
         for s in SHIFTS:
-            assigned = schedule[d][s]
-            diff = len(assigned) - required_staff[s]
+            diff = len(schedule[d][s]) - required_staff[s]
             if diff < 0:
-                score -= abs(diff) * 10000   # 부족
+                score -= abs(diff) * 5000
             elif diff > 0:
-                score -= diff * 500          # 초과
-            for name in assigned:
-                wc[name] += 1
+                score -= diff * 300
 
-    # 시급제 초과 페널티
-    for emp in employees:
-        if emp["직원유형"] == "시급제":
-            over = wc[emp["이름"]] - get_target_work(emp)
-            if over > 0:
-                score -= over * 10000
-
-    # 마감 → 다음날 오픈 페널티 (set 교집합으로 한 번에)
+    # 마감 → 다음날 오픈
     for i in range(len(dates) - 1):
         closing = set(schedule[dates[i]]["마감"])
         opening = set(schedule[dates[i + 1]]["오픈"])
-        score -= len(closing & opening) * 1000
+        score -= len(closing & opening) * 500
 
-    # 연속 근무 5일 초과 페널티
+    # 연속 근무 5일 초과
     for name in emp_by_name:
         work_set = {d for d in dates if any(name in schedule[d][s] for s in SHIFTS)}
         max_c = cur = 0
@@ -517,13 +494,14 @@ def fitness(schedule):
             if cur > max_c:
                 max_c = cur
         if max_c > 5:
-            score -= (max_c - 5) * 5000
+            score -= (max_c - 5) * 2000
 
-    # 근무 분산 (순수 Python으로 np 호출 제거)
+    # 근무 분산
     vals = list(wc.values())
-    mean = sum(vals) / len(vals)
-    std  = (sum((v - mean) ** 2 for v in vals) / len(vals)) ** 0.5
-    score -= std * 10
+    if vals:
+        mean = sum(vals) / len(vals)
+        std  = (sum((v - mean) ** 2 for v in vals) / len(vals)) ** 0.5
+        score -= std * 10
 
     return score
 
@@ -535,7 +513,6 @@ def crossover(p1, p2):
     return repair_schedule(child)
 
 def mutate(schedule, rate=0.05):
-    # 일부 슬롯을 초기화한 뒤 repair_schedule이 다시 채워줌
     for d in dates:
         for s in SHIFTS:
             if random.random() < rate:
@@ -543,10 +520,6 @@ def mutate(schedule, rate=0.05):
     return repair_schedule(schedule)
 
 def run_ga(on_progress=None):
-    """
-    on_progress(gen, total, elapsed, best_score) 콜백을 세대마다 호출.
-    (score, schedule) 쌍으로 관리해 fitness 중복 계산 제거.
-    """
     build_emp_index()
 
     pop_size   = 20
@@ -562,16 +535,15 @@ def run_ga(on_progress=None):
         if scored[0][0] > best_score:
             best_score, best = scored[0]
 
-        elites   = [ind for _, ind in scored[:elite_size]]
         top_pool = [ind for _, ind in scored[:10]]
+        elites   = scored[:elite_size]
 
         children = []
-        while len(elites) + len(children) < pop_size:
+        while len(children) < pop_size - elite_size:
             p1, p2 = random.sample(top_pool, 2)
             children.append(mutate(crossover(p1, p2)))
 
-        # 엘리트는 점수 재사용, 자식만 새로 계산
-        scored = scored[:elite_size] + [(fitness(c), c) for c in children]
+        scored = elites + [(fitness(c), c) for c in children]
 
         if on_progress:
             on_progress(gen + 1, generations, time.time() - start, best_score)
