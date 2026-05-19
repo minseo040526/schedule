@@ -5,6 +5,7 @@ import random
 import calendar
 import sqlite3
 import json
+import time
 from datetime import date
 
 st.set_page_config(page_title="GA 월간 근무 스케줄", layout="wide")
@@ -379,21 +380,13 @@ def create_individual():
 
 def repair_schedule(schedule):
     """위반 배정 제거 후 부족 인원 보충"""
+    lookup = emp_by_name if emp_by_name else {e["이름"]: e for e in employees}
     for d in dates:
         for s in SHIFTS:
-            valid = []
-            for name in schedule[d][s]:
-                emp = next(e for e in employees if e["이름"] == name)
-                # 휴무요청 위반 or 가용불가 → 제거
-                if is_available(emp, d, s):
-                    valid.append(name)
-            # 월급제 목표 초과분 제거
             cleaned = []
-            counts = {e["이름"]: work_count({d2: {s2: [] for s2 in SHIFTS} for d2 in dates}, e["이름"])
-                      for e in employees}
-            for name in valid:
-                emp = next(e for e in employees if e["이름"] == name)
-                if work_count(schedule, name) <= get_target_work(emp):
+            for name in schedule[d][s]:
+                emp = lookup[name]
+                if is_available(emp, d, s) and work_count(schedule, name) <= get_target_work(emp):
                     cleaned.append(name)
             schedule[d][s] = cleaned[:required_staff[s]]
 
@@ -409,49 +402,66 @@ def repair_schedule(schedule):
             schedule[d][s].append(candidates[0]["이름"])
     return schedule
 
+# 이름 → 직원 dict (매 함수 호출마다 linear search 방지)
+emp_by_name: dict = {}
+
+def build_emp_index():
+    global emp_by_name
+    emp_by_name = {e["이름"]: e for e in employees}
+
 def max_consecutive(schedule, name):
     work_set = {d for d in dates if any(name in schedule[d][s] for s in SHIFTS)}
     max_c = cur = 0
     for d in dates:
         cur = cur + 1 if d in work_set else 0
-        max_c = max(max_c, cur)
+        if cur > max_c:
+            max_c = cur
     return max_c
 
 def fitness(schedule):
     score = 0
-    wc    = {e["이름"]: work_count(schedule, e["이름"]) for e in employees}
-
+    # 근무 횟수를 한 번에 집계
+    wc = {name: 0 for name in emp_by_name}
     for d in dates:
         for s in SHIFTS:
             assigned = schedule[d][s]
-            score -= max(0, required_staff[s] - len(assigned)) * 10000  # 인원 부족
-            score -= max(0, len(assigned) - required_staff[s]) * 500    # 인원 초과
+            diff = len(assigned) - required_staff[s]
+            if diff < 0:
+                score += diff * 10000   # 부족
+            elif diff > 0:
+                score -= diff * 500     # 초과
             for name in assigned:
-                emp = next(e for e in employees if e["이름"] == name)
-                if not is_available(emp, d, s):
-                    score -= 100000  # 혹시 남은 위반
+                wc[name] += 1
 
-    # 시급제: 최대 근무 초과 페널티만 (월급제는 can_assign에서 하드 제약)
+    # 시급제 초과 페널티
     for emp in employees:
         if emp["직원유형"] == "시급제":
             over = wc[emp["이름"]] - get_target_work(emp)
             if over > 0:
                 score -= over * 10000
 
-    # 마감 → 다음날 오픈 페널티
+    # 마감 → 다음날 오픈 페널티 (set 교집합으로 한 번에)
     for i in range(len(dates) - 1):
-        for name in [e["이름"] for e in employees]:
-            if name in schedule[dates[i]]["마감"] and name in schedule[dates[i+1]]["오픈"]:
-                score -= 1000
+        closing = set(schedule[dates[i]]["마감"])
+        opening = set(schedule[dates[i + 1]]["오픈"])
+        score -= len(closing & opening) * 1000
 
     # 연속 근무 5일 초과 페널티
-    for emp in employees:
-        mc = max_consecutive(schedule, emp["이름"])
-        if mc > 5:
-            score -= (mc - 5) * 5000
+    for name in emp_by_name:
+        work_set = {d for d in dates if any(name in schedule[d][s] for s in SHIFTS)}
+        max_c = cur = 0
+        for d in dates:
+            cur = cur + 1 if d in work_set else 0
+            if cur > max_c:
+                max_c = cur
+        if max_c > 5:
+            score -= (max_c - 5) * 5000
 
-    # 근무 분산 (표준편차 최소화)
-    score -= np.std(list(wc.values())) * 10
+    # 근무 분산 (순수 Python으로 np 호출 제거)
+    vals = list(wc.values())
+    mean = sum(vals) / len(vals)
+    std  = (sum((v - mean) ** 2 for v in vals) / len(vals)) ** 0.5
+    score -= std * 10
 
     return score
 
@@ -472,23 +482,39 @@ def mutate(schedule, rate=0.05):
                 schedule[d][s] = [e["이름"] for e in candidates[:required_staff[s]]]
     return repair_schedule(schedule)
 
-def run_ga():
-    pop_size   = 30
-    elite_size = 8
+def run_ga(on_progress=None):
+    """
+    on_progress(gen, total, elapsed, best_score) 콜백을 세대마다 호출.
+    (score, schedule) 쌍으로 관리해 fitness 중복 계산 제거.
+    """
+    build_emp_index()
+
+    pop_size   = 20
+    elite_size = 5
     population = [repair_schedule(create_individual()) for _ in range(pop_size)]
-    best, best_score = None, float("-inf")
 
-    for _ in range(generations):
-        population.sort(key=fitness, reverse=True)
-        score = fitness(population[0])
-        if score > best_score:
-            best_score, best = score, population[0]
+    scored = [(fitness(ind), ind) for ind in population]
+    best_score, best = max(scored, key=lambda x: x[0])
+    start = time.time()
 
-        next_gen = population[:elite_size]
-        while len(next_gen) < pop_size:
-            p1, p2 = random.sample(population[:15], 2)
-            next_gen.append(mutate(crossover(p1, p2)))
-        population = next_gen
+    for gen in range(generations):
+        scored.sort(key=lambda x: x[0], reverse=True)
+        if scored[0][0] > best_score:
+            best_score, best = scored[0]
+
+        elites   = [ind for _, ind in scored[:elite_size]]
+        top_pool = [ind for _, ind in scored[:10]]
+
+        children = []
+        while len(elites) + len(children) < pop_size:
+            p1, p2 = random.sample(top_pool, 2)
+            children.append(mutate(crossover(p1, p2)))
+
+        # 엘리트는 점수 재사용, 자식만 새로 계산
+        scored = scored[:elite_size] + [(fitness(c), c) for c in children]
+
+        if on_progress:
+            on_progress(gen + 1, generations, time.time() - start, best_score)
 
     return best, best_score
 
@@ -497,11 +523,26 @@ def run_ga():
 # ─────────────────────────────────────────────
 
 if st.button("GA로 월간 스케줄 생성", type="primary", use_container_width=True):
-    with st.spinner("유전 알고리즘으로 최적 스케줄을 탐색 중입니다..."):
-        best_schedule, best_score = run_ga()
+    prog_bar  = st.progress(0)
+    stat_text = st.empty()
+
+    def on_progress(gen, total, elapsed, best_score):
+        ratio    = gen / total
+        avg_sec  = elapsed / gen
+        remaining = avg_sec * (total - gen)
+        prog_bar.progress(ratio)
+        stat_text.markdown(
+            f"**세대 {gen} / {total}** &nbsp;|&nbsp; "
+            f"경과 {elapsed:.1f}s &nbsp;|&nbsp; "
+            f"예상 남은 시간 **{remaining:.1f}s** &nbsp;|&nbsp; "
+            f"현재 최고 점수 {best_score:,.0f}"
+        )
+
+    best_schedule, best_score = run_ga(on_progress=on_progress)
+    prog_bar.progress(1.0)
+    stat_text.success(f"완료! 총 소요 시간 및 최종 적합도 점수: {round(best_score, 2)}")
 
     st.markdown('<div class="section-title">4. 월간 캘린더 스케줄</div>', unsafe_allow_html=True)
-    st.info(f"적합도 점수: {round(best_score, 2)}")
 
     # 달력 뷰
     first_wd, _ = calendar.monthrange(year, month)
