@@ -210,14 +210,16 @@ emp_type  = st.sidebar.selectbox("직원 유형", ["시급제", "월급제"],
 avail_shifts = st.sidebar.multiselect("가능 근무", SHIFTS, default=_default("가능근무", SHIFTS))
 
 if emp_type == "시급제":
-    avail_days = st.sidebar.multiselect("출근 가능 요일", WEEKDAYS, default=_default("출근가능요일", WEEKDAYS))
+    # 시급제: 가능 요일 설정 O / 월 최대 근무 횟수 O / 휴무일수 표시 X
+    avail_days  = st.sidebar.multiselect("출근 가능 요일", WEEKDAYS, default=_default("출근가능요일", WEEKDAYS))
     monthly_off = None
+    max_work    = st.sidebar.slider("월 최대 근무 횟수", 1, 31, int(_default("월최대근무횟수", 22)))
 else:
+    # 월급제: 요일 설정 X (전 요일) / 월 휴무 개수 O
     avail_days  = WEEKDAYS
     monthly_off = st.sidebar.number_input("월 휴무 개수", 0, 15,
                                            int(_default("월휴무개수", 8) or 8))
-
-max_work = st.sidebar.slider("월 최대 근무 횟수", 1, 31, int(_default("월최대근무횟수", 22)))
+    max_work    = last_day - monthly_off  # 월급제 max_work = 해당 월 일수 - 휴무 개수
 
 # 달력형 휴무 요청 선택
 def calendar_dayoff_selector(dates, year, month, key_prefix, default_selected=None):
@@ -729,14 +731,24 @@ if st.button("GA로 월간 스케줄 생성", type="primary", use_container_widt
             if i < len(dates)-1 and name in best_schedule[d]["마감"] and name in best_schedule[dates[i+1]]["오픈"]:
                 c2o += 1
         target = get_target_work(emp)
-        analysis.append({
+        row = {
             "직원": name, "유형": emp["직원유형"],
-            "목표근무일수": target, "실제근무일수": wc,
-            "목표휴무일수": last_day - target, "실제휴무일수": last_day - wc,
             "오픈횟수": open_cnt, "마감횟수": close_cnt,
+            "실제근무일수": wc,
             "최대연속근무": mc, "마감→다음날오픈": c2o,
-        })
+        }
+        if emp["직원유형"] == "월급제":
+            # 월급제만 목표/실제 근무·휴무 일수 표시
+            row["목표근무일수"] = target
+            row["목표휴무일수"] = last_day - target
+            row["실제휴무일수"] = last_day - wc
+        analysis.append(row)
     analysis_df = pd.DataFrame(analysis)
+    # 컬럼 순서 정리 (없는 컬럼은 자동 제외)
+    col_order = ["직원", "유형", "목표근무일수", "실제근무일수",
+                 "목표휴무일수", "실제휴무일수",
+                 "오픈횟수", "마감횟수", "최대연속근무", "마감→다음날오픈"]
+    analysis_df = analysis_df[[c for c in col_order if c in analysis_df.columns]]
 
     detail = []
     for d in dates:
@@ -854,7 +866,8 @@ if st.button("GA로 월간 스케줄 생성", type="primary", use_container_widt
             bg = "background-color:#dcfce7; color:#166534"
         styles = [bg] * len(row)
         cols = list(row.index)
-        if row["실제근무일수"] != row["목표근무일수"]:
+        # 월급제만 목표근무일수 컬럼이 존재
+        if "목표근무일수" in cols and row["실제근무일수"] != row["목표근무일수"]:
             styles[cols.index("실제근무일수")] = bg + "; font-weight:bold; text-decoration:underline"
         return styles
     st.dataframe(analysis_df.style.apply(style_by_type, axis=1), use_container_width=True)
