@@ -569,31 +569,46 @@ if st.button("GA로 월간 스케줄 생성", type="primary", use_container_widt
 
     st.markdown('<div class="section-title">4. 월간 캘린더 스케줄</div>', unsafe_allow_html=True)
 
-    # 달력 뷰
+    # 달력 뷰 (월급제 ★, 시급제 ◆ 마커)
+    emp_type_map = {e["이름"]: e["직원유형"] for e in employees}
+    def name_with_marker(name):
+        return f"{name}{'★' if emp_type_map.get(name) == '월급제' else '◆'}"
+
     first_wd, _ = calendar.monthrange(year, month)
     rows, week  = [], [""] * first_wd
     for d in dates:
-        o = ", ".join(best_schedule[d]["오픈"]) or "-"
-        c = ", ".join(best_schedule[d]["마감"]) or "-"
+        o = ", ".join(name_with_marker(n) for n in best_schedule[d]["오픈"]) or "-"
+        c = ", ".join(name_with_marker(n) for n in best_schedule[d]["마감"]) or "-"
         week.append(f"{d.day}일\n오픈: {o}\n마감: {c}")
         if len(week) == 7:
             rows.append(week); week = []
     if week:
         rows.append(week + [""] * (7 - len(week)))
     st.dataframe(pd.DataFrame(rows, columns=WEEKDAYS), use_container_width=True, height=500)
+    st.caption("★ 월급제  ◆ 시급제")
 
     st.markdown('<div class="section-title">5. 상세 스케줄표</div>', unsafe_allow_html=True)
     detail = []
     for d in dates:
         detail.append({
             "날짜": d.strftime("%m/%d"), "요일": weekday_str(d),
-            "오픈": ", ".join(best_schedule[d]["오픈"]) or "없음",
-            "마감": ", ".join(best_schedule[d]["마감"]) or "없음",
+            "오픈": ", ".join(name_with_marker(n) for n in best_schedule[d]["오픈"]) or "없음",
+            "마감": ", ".join(name_with_marker(n) for n in best_schedule[d]["마감"]) or "없음",
             "오픈 부족": max(0, open_required  - len(best_schedule[d]["오픈"])),
             "마감 부족": max(0, close_required - len(best_schedule[d]["마감"])),
         })
     result_df = pd.DataFrame(detail)
-    st.dataframe(result_df, use_container_width=True)
+
+    def highlight_shortage(row):
+        styles = [""] * len(row)
+        cols = list(row.index)
+        if row.get("오픈 부족", 0) > 0:
+            styles[cols.index("오픈 부족")] = "background-color:#fee2e2; color:#b91c1c; font-weight:bold"
+        if row.get("마감 부족", 0) > 0:
+            styles[cols.index("마감 부족")] = "background-color:#fee2e2; color:#b91c1c; font-weight:bold"
+        return styles
+
+    st.dataframe(result_df.style.apply(highlight_shortage, axis=1), use_container_width=True)
 
     st.markdown('<div class="section-title">6. 직원별 근무 분석</div>', unsafe_allow_html=True)
     analysis = []
@@ -616,7 +631,21 @@ if st.button("GA로 월간 스케줄 생성", type="primary", use_container_widt
             "최대연속근무": mc, "마감→다음날오픈": c2o,
         })
     analysis_df = pd.DataFrame(analysis)
-    st.dataframe(analysis_df, use_container_width=True)
+
+    def style_by_type(row):
+        if row["유형"] == "월급제":
+            base = "background-color:#dbeafe; color:#1e40af"   # 파란 계열
+        else:
+            base = "background-color:#dcfce7; color:#166534"   # 초록 계열
+        # 실제 != 목표면 근무일수 셀 강조
+        styles = [base] * len(row)
+        cols = list(row.index)
+        if row["실제근무일수"] != row["목표근무일수"]:
+            styles[cols.index("실제근무일수")] = base + "; font-weight:bold; text-decoration:underline"
+        return styles
+
+    st.dataframe(analysis_df.style.apply(style_by_type, axis=1), use_container_width=True)
+    st.caption("🟦 월급제  🟩 시급제  |  실제근무일수 밑줄 = 목표 불일치")
 
     total_shortage = int(result_df["오픈 부족"].sum() + result_df["마감 부족"].sum())
     col1, col2, col3 = st.columns(3)
