@@ -562,27 +562,38 @@ def max_consecutive(schedule, name):
 
 def fitness(schedule):
     """
-    GA가 실제로 개선할 수 있는 소프트 제약만 감점.
-    인원 부족/초과는 직원 수 한계로 불가피하므로 제외.
-    0점이 이상적이며, 위반 건수만큼 감점.
+    - 인원 부족: 가장 큰 감점 (GA가 최우선으로 해결해야 할 항목)
+    - 인원 초과: 소폭 감점
+    - 마감→다음날 오픈: 소프트 페널티
+    - 시급제 초과/분산: 소프트 페널티
+    완벽한 스케줄(부족 0, 소프트 위반 0)이면 0점.
     """
     score = 0
     wc = calc_wc(schedule)
 
-    # 마감 → 다음날 오픈 (소프트 선호)
+    # 인원 부족/초과 — 가장 중요한 항목
+    for d in dates:
+        for s in SHIFTS:
+            diff = len(schedule[d][s]) - required_staff[s]
+            if diff < 0:
+                score -= abs(diff) * 1000   # 부족: GA가 반드시 줄여야 함
+            elif diff > 0:
+                score -= diff * 100         # 초과: 작게 감점
+
+    # 마감 → 다음날 오픈 (소프트)
     for i in range(len(dates) - 1):
         closing = set(schedule[dates[i]]["마감"])
         opening = set(schedule[dates[i + 1]]["오픈"])
         score -= len(closing & opening) * 100
 
-    # 시급제 초과 근무 페널티
+    # 시급제 초과 근무
     for emp in employees:
         if emp["직원유형"] == "시급제":
             over = wc[emp["이름"]] - get_target_work(emp)
             if over > 0:
                 score -= over * 500
 
-    # 시급제 근무 분산 (표준편차 최소화)
+    # 시급제 근무 분산
     part_time_wc = [wc[e["이름"]] for e in employees if e["직원유형"] == "시급제"]
     if len(part_time_wc) > 1:
         mean = sum(part_time_wc) / len(part_time_wc)
@@ -700,53 +711,6 @@ if st.button("GA로 월간 스케줄 생성", type="primary", use_container_widt
         if row.get("마감 부족", 0) > 0:
             styles[cols.index("마감 부족")] = "background-color:#fee2e2; color:#b91c1c; font-weight:bold"
         return styles
-
-    st.dataframe(result_df.style.apply(highlight_shortage, axis=1), use_container_width=True)
-
-    st.markdown('<div class="section-title">6. 직원별 근무 분석</div>', unsafe_allow_html=True)
-    analysis = []
-    for emp in employees:
-        name = emp["이름"]
-        wc   = work_count(best_schedule, name)
-        mc   = max_consecutive(best_schedule, name)
-        open_cnt = close_cnt = c2o = 0
-        for i, d in enumerate(dates):
-            if name in best_schedule[d]["오픈"]: open_cnt += 1
-            if name in best_schedule[d]["마감"]: close_cnt += 1
-            if i < len(dates)-1 and name in best_schedule[d]["마감"] and name in best_schedule[dates[i+1]]["오픈"]:
-                c2o += 1
-        target = get_target_work(emp)
-        analysis.append({
-            "직원": name, "유형": emp["직원유형"],
-            "목표근무일수": target, "실제근무일수": wc,
-            "목표휴무일수": last_day - target, "실제휴무일수": last_day - wc,
-            "오픈횟수": open_cnt, "마감횟수": close_cnt,
-            "최대연속근무": mc, "마감→다음날오픈": c2o,
-        })
-    analysis_df = pd.DataFrame(analysis)
-
-    def style_by_type(row):
-        if row["유형"] == "월급제":
-            base = "background-color:#dbeafe; color:#1e40af"   # 파란 계열
-        else:
-            base = "background-color:#dcfce7; color:#166534"   # 초록 계열
-        # 실제 != 목표면 근무일수 셀 강조
-        styles = [base] * len(row)
-        cols = list(row.index)
-        if row["실제근무일수"] != row["목표근무일수"]:
-            styles[cols.index("실제근무일수")] = base + "; font-weight:bold; text-decoration:underline"
-        return styles
-
-    st.dataframe(analysis_df.style.apply(style_by_type, axis=1), use_container_width=True)
-    st.caption("🟦 월급제  🟩 시급제  |  실제근무일수 밑줄 = 목표 불일치")
-
-    total_shortage = int(result_df["오픈 부족"].sum() + result_df["마감 부족"].sum())
-    col1, col2, col3 = st.columns(3)
-    col1.metric("총 부족 인원",         total_shortage)
-    col2.metric("마감→다음날 오픈",      int(analysis_df["마감→다음날오픈"].sum()))
-    col3.metric("5일 초과 연속근무 직원", int((analysis_df["최대연속근무"] > 5).sum()))
-
-    st.success("월간 스케줄 생성이 완료되었습니다.")
 
     st.dataframe(result_df.style.apply(highlight_shortage, axis=1), use_container_width=True)
 
