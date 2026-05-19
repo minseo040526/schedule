@@ -464,12 +464,24 @@ def build_schedule_from_scratch():
 
     return schedule
 
+def consecutive_run_length(schedule, name, d):
+    """날짜 d를 포함하는 연속 근무 블록의 길이"""
+    idx = dates.index(d)
+    start = idx
+    while start > 0 and any(name in schedule[dates[start-1]][s] for s in SHIFTS):
+        start -= 1
+    end = idx
+    while end < len(dates)-1 and any(name in schedule[dates[end+1]][s] for s in SHIFTS):
+        end += 1
+    return end - start + 1
+
 def repair_schedule(schedule):
     """
-    1단계 — 하드 제약 위반 제거
-    2단계 — 초과분 제거 (날짜 기준 wc)
-    3단계 — 월급제 목표 미달 직원 우선 보충
-    4단계 — 나머지 인원 부족 슬롯 보충
+    1단계 — 하드 제약 위반 제거 (휴무요청/불가시프트)
+    2단계 — 연속 5일 초과 위반 제거 (뒤쪽 날짜부터 제거해 앞쪽 보존)
+    3단계 — 날짜 기준 wc 집계 후 근무일수 초과분 제거
+    4단계 — 월급제 목표 미달 직원 우선 강제 보충
+    5단계 — 나머지 슬롯 부족 보충
     """
     lookup = emp_by_name if emp_by_name else {e["이름"]: e for e in employees}
 
@@ -481,7 +493,18 @@ def repair_schedule(schedule):
                 if is_available(lookup[name], d, s)
             ]
 
-    # 2단계: 날짜 기준 wc 집계 후 초과분 제거
+    # 2단계: 연속 5일 초과 제거 — 역순으로 돌며 블록이 5 초과인 직원 제거
+    for d in reversed(dates):
+        for s in SHIFTS:
+            kept = []
+            for name in schedule[d][s]:
+                if consecutive_run_length(schedule, name, d) > 5:
+                    pass  # 제거 (뒤쪽 날짜부터 걷어냄)
+                else:
+                    kept.append(name)
+            schedule[d][s] = kept
+
+    # 3단계: 날짜 기준 wc 집계 후 근무일수 초과분 제거
     wc = calc_wc(schedule)
     for d in reversed(dates):
         for s in SHIFTS:
@@ -495,7 +518,7 @@ def repair_schedule(schedule):
                     kept.append(name)
             schedule[d][s] = kept
 
-    # 3단계: 월급제 목표 미달 직원 우선 강제 보충 (연속 5일 제약 준수)
+    # 4단계: 월급제 목표 미달 직원 우선 강제 보충 (연속 5일 제약 준수)
     monthly_short = [
         e for e in employees
         if e["직원유형"] == "월급제" and wc[e["이름"]] < get_target_work(e)
@@ -517,7 +540,7 @@ def repair_schedule(schedule):
                 s = random.choice(avail_shifts)
                 schedule[d][s].append(name)
                 wc[name] += 1
-        # 연속 제약으로 여전히 미달이면 제약 무시하고 채움 (목표 달성 우선)
+        # 연속 제약으로 여전히 미달이면 제약 완화 (목표 달성 우선)
         if wc[name] < target:
             for d in dates:
                 if wc[name] >= target:
@@ -530,7 +553,7 @@ def repair_schedule(schedule):
                     schedule[d][s].append(name)
                     wc[name] += 1
 
-    # 4단계: 나머지 슬롯 부족 보충 (연속 5일 제약 준수)
+    # 5단계: 나머지 슬롯 부족 보충 (연속 5일 제약 준수)
     slots = [(d, s) for d in dates for s in SHIFTS]
     random.shuffle(slots)
     for d, s in slots:
