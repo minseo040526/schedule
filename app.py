@@ -375,11 +375,37 @@ def _available_days(emp):
         result.add(d)
     return result
 
+def consecutive_count(schedule, name, up_to_date):
+    """up_to_date 이전까지 연속 근무일수 (당일 포함 안 함)"""
+    idx = dates.index(up_to_date)
+    count = 0
+    for i in range(idx - 1, -1, -1):
+        if any(name in schedule[dates[i]][s] for s in SHIFTS):
+            count += 1
+        else:
+            break
+    return count
+
+def would_exceed_5(schedule, name, d):
+    """d에 배정하면 연속 5일 초과 여부"""
+    before = consecutive_count(schedule, name, d)
+    if before >= 5:
+        return True
+    # d 이후 연속일 확인
+    idx = dates.index(d)
+    after = 0
+    for i in range(idx + 1, len(dates)):
+        if any(name in schedule[dates[i]][s] for s in SHIFTS):
+            after += 1
+        else:
+            break
+    return (before + 1 + after) > 5
+
 def build_schedule_from_scratch():
     """
     월급제 직원을 먼저 목표 근무일수만큼 배정한 뒤,
     시급제 직원으로 나머지 슬롯을 채우는 2-패스 방식.
-    이렇게 하면 월급제 목표 일수가 반드시 지켜짐.
+    연속 5일 초과 금지를 하드 제약으로 적용.
     """
     schedule = empty_schedule()
     wc = {e["이름"]: 0 for e in employees}
@@ -387,28 +413,35 @@ def build_schedule_from_scratch():
     # ── 패스 1: 월급제 직원 목표 근무일수 배정 ──────────────────────────
     monthly_emps = [e for e in employees if e["직원유형"] == "월급제"]
     for emp in monthly_emps:
-        target   = get_target_work(emp)
-        name     = emp["이름"]
-        avail    = sorted(_available_days(emp))  # 가능한 날짜 목록
-        # 가능한 날짜 중 랜덤으로 target개 선택
-        if len(avail) < target:
-            work_days = avail[:]
-        else:
-            work_days = random.sample(avail, target)
-        work_days_set = set(work_days)
-
-        for d in work_days_set:
-            # 가능한 시프트 중 하나 배정
-            avail_shifts = [s for s in SHIFTS if s in emp["가능근무"]]
-            if not avail_shifts:
-                continue
-            random.shuffle(avail_shifts)
-            # 이미 해당 날 배정된 시프트 제외 후 가용 슬롯 우선
-            for s in avail_shifts:
-                if name not in schedule[d][s]:
+        target = get_target_work(emp)
+        name   = emp["이름"]
+        avail  = sorted(_available_days(emp))
+        # 연속 5일 제약을 고려해 그리디하게 배정
+        work_days = []
+        avail_shuffled = avail[:]
+        random.shuffle(avail_shuffled)
+        for d in avail_shuffled:
+            if len(work_days) >= target:
+                break
+            if not would_exceed_5(schedule, name, d):
+                work_days.append(d)
+                avail_shifts = [s for s in SHIFTS if s in emp["가능근무"]]
+                if avail_shifts:
+                    s = random.choice(avail_shifts)
                     schedule[d][s].append(name)
+                    wc[name] += 1
+        # 연속제약 때문에 target 미달 시 제약 완화해서 채움
+        if wc[name] < target:
+            remaining = [d for d in avail if not any(name in schedule[d][sx] for sx in SHIFTS)]
+            random.shuffle(remaining)
+            for d in remaining:
+                if wc[name] >= target:
                     break
-            wc[name] += 1
+                avail_shifts = [s for s in SHIFTS if s in emp["가능근무"]]
+                if avail_shifts:
+                    s = random.choice(avail_shifts)
+                    schedule[d][s].append(name)
+                    wc[name] += 1
 
     # ── 패스 2: 빈 슬롯을 시급제/부족한 월급제로 채우기 ─────────────────
     slots = [(d, s) for d in dates for s in SHIFTS]
@@ -420,6 +453,7 @@ def build_schedule_from_scratch():
                 if is_available(e, d, s)
                 and not any(e["이름"] in schedule[d][sx] for sx in SHIFTS)
                 and wc[e["이름"]] < get_target_work(e)
+                and not would_exceed_5(schedule, e["이름"], d)
             ]
             if not candidates:
                 break
@@ -461,7 +495,7 @@ def repair_schedule(schedule):
                     kept.append(name)
             schedule[d][s] = kept
 
-    # 3단계: 월급제 목표 미달 직원 우선 강제 보충
+    # 3단계: 월급제 목표 미달 직원 우선 강제 보충 (연속 5일 제약 준수)
     monthly_short = [
         e for e in employees
         if e["직원유형"] == "월급제" and wc[e["이름"]] < get_target_work(e)
@@ -469,26 +503,34 @@ def repair_schedule(schedule):
     for emp in monthly_short:
         name   = emp["이름"]
         target = get_target_work(emp)
-        # 아직 배정 안 된 날 중 가능한 날에 강제 배정
-        for d in dates:
+        day_list = list(dates)
+        random.shuffle(day_list)
+        for d in day_list:
             if wc[name] >= target:
                 break
             if any(name in schedule[d][sx] for sx in SHIFTS):
-                continue  # 이미 이 날 근무 중
-            avail_shifts = [
-                s for s in SHIFTS
-                if is_available(emp, d, s)
-                and len(schedule[d][s]) < required_staff[s] * 2  # 너무 초과하지 않게
-            ]
-            if not avail_shifts:
-                # 필요인원 초과해도 넣어야 함 (목표 달성 우선)
-                avail_shifts = [s for s in SHIFTS if is_available(emp, d, s)]
+                continue
+            if would_exceed_5(schedule, name, d):
+                continue
+            avail_shifts = [s for s in SHIFTS if is_available(emp, d, s)]
             if avail_shifts:
                 s = random.choice(avail_shifts)
                 schedule[d][s].append(name)
                 wc[name] += 1
+        # 연속 제약으로 여전히 미달이면 제약 무시하고 채움 (목표 달성 우선)
+        if wc[name] < target:
+            for d in dates:
+                if wc[name] >= target:
+                    break
+                if any(name in schedule[d][sx] for sx in SHIFTS):
+                    continue
+                avail_shifts = [s for s in SHIFTS if is_available(emp, d, s)]
+                if avail_shifts:
+                    s = random.choice(avail_shifts)
+                    schedule[d][s].append(name)
+                    wc[name] += 1
 
-    # 4단계: 나머지 슬롯 부족 보충
+    # 4단계: 나머지 슬롯 부족 보충 (연속 5일 제약 준수)
     slots = [(d, s) for d in dates for s in SHIFTS]
     random.shuffle(slots)
     for d, s in slots:
@@ -498,6 +540,7 @@ def repair_schedule(schedule):
                 if is_available(e, d, s)
                 and not any(e["이름"] in schedule[d][sx] for sx in SHIFTS)
                 and wc[e["이름"]] < get_target_work(e)
+                and not would_exceed_5(schedule, e["이름"], d)
             ]
             if not candidates:
                 break
@@ -534,22 +577,11 @@ def fitness(schedule):
             elif diff > 0:
                 score -= diff * 200
 
-    # 마감 → 다음날 오픈 (강화)
+    # 마감 → 다음날 오픈 (소프트 페널티, 작게)
     for i in range(len(dates) - 1):
         closing = set(schedule[dates[i]]["마감"])
         opening = set(schedule[dates[i + 1]]["오픈"])
-        score -= len(closing & opening) * 2000
-
-    # 연속 근무 5일 초과
-    for name in emp_by_name:
-        work_set = {d for d in dates if any(name in schedule[d][s] for s in SHIFTS)}
-        max_c = cur = 0
-        for d in dates:
-            cur = cur + 1 if d in work_set else 0
-            if cur > max_c:
-                max_c = cur
-        if max_c > 5:
-            score -= (max_c - 5) * 3000
+        score -= len(closing & opening) * 300
 
     # 시급제 초과 근무 페널티
     for emp in employees:
