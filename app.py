@@ -329,7 +329,6 @@ required_staff = {"오픈": open_required, "마감": close_required}
 # GA 로직
 # ─────────────────────────────────────────────
 
-# 이름 → 직원 dict
 emp_by_name: dict = {}
 
 def build_emp_index():
@@ -337,13 +336,11 @@ def build_emp_index():
     emp_by_name = {e["이름"]: e for e in employees}
 
 def get_target_work(emp):
-    """목표 근무일수"""
     if emp["직원유형"] == "월급제":
         return last_day - emp["월휴무개수"]
     return emp["월최대근무횟수"]
 
 def is_available(emp, work_date, shift):
-    """하드 제약: 휴무요청일 / 불가 시프트 / 시급제 불가 요일"""
     if work_date in emp["휴무요청"]:
         return False
     if shift not in emp["가능근무"]:
@@ -356,53 +353,93 @@ def empty_schedule():
     return {d: {s: [] for s in SHIFTS} for d in dates}
 
 def calc_wc(schedule):
-    """날짜 기준 근무일수 집계 — 같은 날 오픈+마감이어도 1일"""
+    """날짜 기준 근무일수 (같은 날 오픈+마감 = 1일)"""
     wc = {e["이름"]: 0 for e in employees}
     for d in dates:
-        worked = set()
-        for s in SHIFTS:
-            for name in schedule[d][s]:
-                worked.add(name)
+        worked = {name for s in SHIFTS for name in schedule[d][s]}
         for name in worked:
             wc[name] += 1
     return wc
 
 def work_count(schedule, name):
-    """분석/결과 출력용"""
     return sum(1 for d in dates if any(name in schedule[d][s] for s in SHIFTS))
 
-def create_individual():
+def _available_days(emp):
+    """해당 직원이 배정 가능한 날짜 집합 (휴무요청 제외, 시급제는 요일 필터)"""
+    result = set()
+    for d in dates:
+        if d in emp["휴무요청"]:
+            continue
+        if emp["직원유형"] == "시급제" and weekday_str(d) not in emp["출근가능요일"]:
+            continue
+        result.add(d)
+    return result
+
+def build_schedule_from_scratch():
     """
-    날짜 순서가 아닌 날짜를 셔플해서 배정.
-    wc를 직접 추적해 목표치 초과 배정을 원천 차단.
+    월급제 직원을 먼저 목표 근무일수만큼 배정한 뒤,
+    시급제 직원으로 나머지 슬롯을 채우는 2-패스 방식.
+    이렇게 하면 월급제 목표 일수가 반드시 지켜짐.
     """
     schedule = empty_schedule()
     wc = {e["이름"]: 0 for e in employees}
-    day_order = list(dates)
-    random.shuffle(day_order)
-    for d in day_order:
-        for s in SHIFTS:
+
+    # ── 패스 1: 월급제 직원 목표 근무일수 배정 ──────────────────────────
+    monthly_emps = [e for e in employees if e["직원유형"] == "월급제"]
+    for emp in monthly_emps:
+        target   = get_target_work(emp)
+        name     = emp["이름"]
+        avail    = sorted(_available_days(emp))  # 가능한 날짜 목록
+        # 가능한 날짜 중 랜덤으로 target개 선택
+        if len(avail) < target:
+            work_days = avail[:]
+        else:
+            work_days = random.sample(avail, target)
+        work_days_set = set(work_days)
+
+        for d in work_days_set:
+            # 가능한 시프트 중 하나 배정
+            avail_shifts = [s for s in SHIFTS if s in emp["가능근무"]]
+            if not avail_shifts:
+                continue
+            random.shuffle(avail_shifts)
+            # 이미 해당 날 배정된 시프트 제외 후 가용 슬롯 우선
+            for s in avail_shifts:
+                if name not in schedule[d][s]:
+                    schedule[d][s].append(name)
+                    break
+            wc[name] += 1
+
+    # ── 패스 2: 빈 슬롯을 시급제/부족한 월급제로 채우기 ─────────────────
+    slots = [(d, s) for d in dates for s in SHIFTS]
+    random.shuffle(slots)
+    for d, s in slots:
+        while len(schedule[d][s]) < required_staff[s]:
             candidates = [
                 e for e in employees
                 if is_available(e, d, s)
-                and wc[e["이름"]] < get_target_work(e)
                 and not any(e["이름"] in schedule[d][sx] for sx in SHIFTS)
+                and wc[e["이름"]] < get_target_work(e)
             ]
+            if not candidates:
+                break
             random.shuffle(candidates)
-            for e in candidates[:required_staff[s]]:
-                schedule[d][s].append(e["이름"])
-                wc[e["이름"]] += 1
+            chosen = candidates[0]
+            schedule[d][s].append(chosen["이름"])
+            wc[chosen["이름"]] += 1
+
     return schedule
 
 def repair_schedule(schedule):
     """
-    1단계 — 하드 제약 위반 제거 (휴무요청, 불가 시프트/요일)
-    2단계 — 날짜 기준 wc 재집계 후 초과분 제거
-    3단계 — wc 추적하며 부족 인원 보충
+    1단계 — 하드 제약 위반 제거
+    2단계 — 초과분 제거 (날짜 기준 wc)
+    3단계 — 월급제 목표 미달 직원 우선 보충
+    4단계 — 나머지 인원 부족 슬롯 보충
     """
     lookup = emp_by_name if emp_by_name else {e["이름"]: e for e in employees}
 
-    # 1단계
+    # 1단계: 하드 제약 위반 제거
     for d in dates:
         for s in SHIFTS:
             schedule[d][s] = [
@@ -410,26 +447,48 @@ def repair_schedule(schedule):
                 if is_available(lookup[name], d, s)
             ]
 
-    # 2단계: 날짜 기준 wc 집계
+    # 2단계: 날짜 기준 wc 집계 후 초과분 제거
     wc = calc_wc(schedule)
-
-    # 초과분 제거: 역순으로 돌며 초과한 직원을 슬롯에서 제거
     for d in reversed(dates):
         for s in SHIFTS:
             kept = []
             for name in schedule[d][s]:
-                target = get_target_work(lookup[name])
-                if wc[name] > target:
-                    # 이 날 해당 name이 다른 시프트에 없을 때만 wc 감소
-                    other_today = any(name in schedule[d][sx] for sx in SHIFTS if sx != s)
-                    if not other_today:
+                if wc[name] > get_target_work(lookup[name]):
+                    other = any(name in schedule[d][sx] for sx in SHIFTS if sx != s)
+                    if not other:
                         wc[name] -= 1
-                    # 어떤 경우든 이 슬롯에서는 제거
                 else:
                     kept.append(name)
             schedule[d][s] = kept
 
-    # 3단계: 부족 보충 (wc 직접 추적)
+    # 3단계: 월급제 목표 미달 직원 우선 강제 보충
+    monthly_short = [
+        e for e in employees
+        if e["직원유형"] == "월급제" and wc[e["이름"]] < get_target_work(e)
+    ]
+    for emp in monthly_short:
+        name   = emp["이름"]
+        target = get_target_work(emp)
+        # 아직 배정 안 된 날 중 가능한 날에 강제 배정
+        for d in dates:
+            if wc[name] >= target:
+                break
+            if any(name in schedule[d][sx] for sx in SHIFTS):
+                continue  # 이미 이 날 근무 중
+            avail_shifts = [
+                s for s in SHIFTS
+                if is_available(emp, d, s)
+                and len(schedule[d][s]) < required_staff[s] * 2  # 너무 초과하지 않게
+            ]
+            if not avail_shifts:
+                # 필요인원 초과해도 넣어야 함 (목표 달성 우선)
+                avail_shifts = [s for s in SHIFTS if is_available(emp, d, s)]
+            if avail_shifts:
+                s = random.choice(avail_shifts)
+                schedule[d][s].append(name)
+                wc[name] += 1
+
+    # 4단계: 나머지 슬롯 부족 보충
     slots = [(d, s) for d in dates for s in SHIFTS]
     random.shuffle(slots)
     for d, s in slots:
@@ -446,6 +505,7 @@ def repair_schedule(schedule):
             chosen = candidates[0]["이름"]
             schedule[d][s].append(chosen)
             wc[chosen] += 1
+
     return schedule
 
 def max_consecutive(schedule, name):
@@ -459,31 +519,26 @@ def max_consecutive(schedule, name):
 
 def fitness(schedule):
     """
-    점수 기준:
-    - 인원 부족: -5000/명/일 (하드 제약이지만 불가피한 경우 대비)
-    - 인원 초과: -300/명/일
-    - 마감→다음날오픈: -500/건
-    - 연속근무 5일 초과: -2000/일
-    - 근무분산 표준편차: -10
-    월급제 근무일수는 repair_schedule에서 하드 제약으로 보장하므로 fitness 페널티 없음.
+    소프트 제약만 감점. 인원 충족/월급제 근무일수는 repair로 보장.
+    기준점 0에서 시작해 위반 시에만 감점 → 점수가 0에 가까울수록 좋음.
     """
     score = 0
-    # 날짜 기준 wc (fitness에서도 날짜 기준 사용)
     wc = calc_wc(schedule)
 
+    # 인원 부족/초과 (불가피한 경우만 발생)
     for d in dates:
         for s in SHIFTS:
             diff = len(schedule[d][s]) - required_staff[s]
             if diff < 0:
-                score -= abs(diff) * 5000
+                score -= abs(diff) * 3000
             elif diff > 0:
-                score -= diff * 300
+                score -= diff * 200
 
-    # 마감 → 다음날 오픈
+    # 마감 → 다음날 오픈 (강화)
     for i in range(len(dates) - 1):
         closing = set(schedule[dates[i]]["마감"])
         opening = set(schedule[dates[i + 1]]["오픈"])
-        score -= len(closing & opening) * 500
+        score -= len(closing & opening) * 2000
 
     # 연속 근무 5일 초과
     for name in emp_by_name:
@@ -494,14 +549,21 @@ def fitness(schedule):
             if cur > max_c:
                 max_c = cur
         if max_c > 5:
-            score -= (max_c - 5) * 2000
+            score -= (max_c - 5) * 3000
 
-    # 근무 분산
-    vals = list(wc.values())
-    if vals:
-        mean = sum(vals) / len(vals)
-        std  = (sum((v - mean) ** 2 for v in vals) / len(vals)) ** 0.5
-        score -= std * 10
+    # 시급제 초과 근무 페널티
+    for emp in employees:
+        if emp["직원유형"] == "시급제":
+            over = wc[emp["이름"]] - get_target_work(emp)
+            if over > 0:
+                score -= over * 5000
+
+    # 근무 분산 (시급제끼리만)
+    part_time_wc = [wc[e["이름"]] for e in employees if e["직원유형"] == "시급제"]
+    if len(part_time_wc) > 1:
+        mean = sum(part_time_wc) / len(part_time_wc)
+        std  = (sum((v - mean) ** 2 for v in part_time_wc) / len(part_time_wc)) ** 0.5
+        score -= std * 50
 
     return score
 
@@ -524,7 +586,7 @@ def run_ga(on_progress=None):
 
     pop_size   = 20
     elite_size = 5
-    population = [repair_schedule(create_individual()) for _ in range(pop_size)]
+    population = [repair_schedule(build_schedule_from_scratch()) for _ in range(pop_size)]
 
     scored = [(fitness(ind), ind) for ind in population]
     best_score, best = max(scored, key=lambda x: x[0])
