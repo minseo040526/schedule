@@ -764,6 +764,8 @@ if st.button("GA로 월간 스케줄 생성", type="primary", use_container_widt
 
     # ── GA 수렴 그래프 ────────────────────────────────────────────────────
     with st.expander("📈 GA 수렴 그래프", expanded=True):
+        import altair as alt
+
         n_emps  = max(len(employees), 1)
         max_req = max(required_staff.values())
         base_score = (
@@ -773,12 +775,46 @@ if st.button("GA로 월간 스케줄 생성", type="primary", use_container_widt
             + last_day * 30
         )
 
+        # y축 하한: 전체 점수 중 최솟값의 95% (변화가 잘 보이도록)
+        y_min = min(min(history_best), min(history_avg)) * 0.995
+        y_max = base_score * 1.005
+
+        gens = list(range(len(history_best)))
         chart_df = pd.DataFrame({
-            "최고 점수":   history_best,
-            "평균 점수":   history_avg,
-            "이론상 최고점": [base_score] * len(history_best),
+            "세대":      gens + gens + gens,
+            "점수":      history_best + history_avg + [base_score] * len(gens),
+            "구분":      ["최고 점수"] * len(gens)
+                        + ["평균 점수"] * len(gens)
+                        + ["이론상 최고점"] * len(gens),
         })
-        st.line_chart(chart_df, use_container_width=True, height=300)
+
+        color_scale = alt.Scale(
+            domain=["최고 점수", "평균 점수", "이론상 최고점"],
+            range=["#6c63ff", "#a78bfa", "#00d4aa"],
+        )
+        stroke_dash = alt.condition(
+            alt.datum["구분"] == "이론상 최고점",
+            alt.value([4, 4]),
+            alt.value([0]),
+        )
+
+        chart = (
+            alt.Chart(chart_df)
+            .mark_line(point=False)
+            .encode(
+                x=alt.X("세대:Q", title="세대"),
+                y=alt.Y("점수:Q", title="적합도 점수",
+                        scale=alt.Scale(domain=[y_min, y_max])),
+                color=alt.Color("구분:N", scale=color_scale,
+                                legend=alt.Legend(orient="top")),
+                strokeDash=stroke_dash,
+                tooltip=["세대:Q", "구분:N",
+                         alt.Tooltip("점수:Q", format=",")],
+            )
+            .properties(height=320)
+            .interactive()
+        )
+        st.altair_chart(chart, use_container_width=True)
 
         col_a, col_b, col_c, col_d = st.columns(4)
         col_a.metric("초기 점수",  f"{history_best[0]:,.0f}")
