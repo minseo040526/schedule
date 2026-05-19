@@ -585,25 +585,37 @@ def max_consecutive(schedule, name):
 
 def fitness(schedule):
     """
-    - 인원 부족: 가장 큰 감점 (GA가 최우선으로 해결해야 할 항목)
-    - 인원 초과: 소폭 감점
-    - 마감→다음날 오픈: 소프트 페널티
-    - 시급제 초과/분산: 소프트 페널티
-    완벽한 스케줄(부족 0, 소프트 위반 0)이면 0점.
+    시작점수(base)에서 위반 시 감점.
+    완벽한 스케줄 = base점, 위반이 많을수록 낮아짐 → 항상 양수 유지.
+
+    base 계산:
+      - 인원부족 최대 감점: last_day × shift수 × max_required × 1000
+      - 마감→오픈 최대 감점: (last_day-1) × emp수 × 100
+      - 시급제 초과 최대 감점: emp수 × last_day × 500
+      - 분산 최대 감점: last_day × 30 (std 최대 last_day로 가정)
     """
-    score = 0
+    n_emps     = max(len(employees), 1)
+    max_req    = max(required_staff.values())
+    base = (
+        last_day * len(SHIFTS) * max_req * 1000   # 인원 부족 최대치
+        + (last_day - 1) * n_emps * 100           # 마감→오픈 최대치
+        + n_emps * last_day * 500                 # 시급제 초과 최대치
+        + last_day * 30                           # 분산 최대치
+    )
+
+    score = base
     wc = calc_wc(schedule)
 
-    # 인원 부족/초과 — 가장 중요한 항목
+    # 인원 부족/초과
     for d in dates:
         for s in SHIFTS:
             diff = len(schedule[d][s]) - required_staff[s]
             if diff < 0:
-                score -= abs(diff) * 1000   # 부족: GA가 반드시 줄여야 함
+                score -= abs(diff) * 1000
             elif diff > 0:
-                score -= diff * 100         # 초과: 작게 감점
+                score -= diff * 100
 
-    # 마감 → 다음날 오픈 (소프트)
+    # 마감 → 다음날 오픈
     for i in range(len(dates) - 1):
         closing = set(schedule[dates[i]]["마감"])
         opening = set(schedule[dates[i + 1]]["오픈"])
