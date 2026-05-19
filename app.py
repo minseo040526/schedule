@@ -659,30 +659,32 @@ def run_ga(on_progress=None):
     population = [repair_schedule(build_schedule_from_scratch()) for _ in range(pop_size)]
 
     scored = [(fitness(ind), ind) for ind in population]
-    best_score, best = max(scored, key=lambda x: x[0])
+    scored.sort(key=lambda x: x[0], reverse=True)
+    best_score, best = scored[0]
     start = time.time()
 
-    history_best = []   # 세대별 최고 점수
-    history_avg  = []   # 세대별 평균 점수
+    # 0세대 (초기 집단) 기록 → 초반 급등 구간이 그래프에 보임
+    history_best = [scored[0][0]]
+    history_avg  = [sum(s for s, _ in scored) / len(scored)]
 
     for gen in range(generations):
-        scored.sort(key=lambda x: x[0], reverse=True)
-        if scored[0][0] > best_score:
-            best_score, best = scored[0]
-
-        gen_scores = [s for s, _ in scored]
-        history_best.append(scored[0][0])
-        history_avg.append(sum(gen_scores) / len(gen_scores))
-
         top_pool = [ind for _, ind in scored[:10]]
-        elites   = scored[:elite_size]
+        elites   = [ind for _, ind in scored[:elite_size]]
 
         children = []
         while len(children) < pop_size - elite_size:
             p1, p2 = random.sample(top_pool, 2)
             children.append(mutate(crossover(p1, p2)))
 
-        scored = elites + [(fitness(c), c) for c in children]
+        # 전체 재계산 (엘리트 포함) → 점수 변화가 그래프에 정직하게 반영
+        scored = [(fitness(ind), ind) for ind in elites + children]
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        if scored[0][0] > best_score:
+            best_score, best = scored[0]
+
+        history_best.append(scored[0][0])
+        history_avg.append(sum(s for s, _ in scored) / len(scored))
 
         if on_progress:
             on_progress(gen + 1, generations, time.time() - start, best_score)
