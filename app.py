@@ -583,27 +583,10 @@ def max_consecutive(schedule, name):
             max_c = cur
     return max_c
 
+_fitness_base: float = 0.0   # run_ga 시작 시 한 번만 계산
+
 def fitness(schedule):
-    """
-    시작점수(base)에서 위반 시 감점.
-    완벽한 스케줄 = base점, 위반이 많을수록 낮아짐 → 항상 양수 유지.
-
-    base 계산:
-      - 인원부족 최대 감점: last_day × shift수 × max_required × 1000
-      - 마감→오픈 최대 감점: (last_day-1) × emp수 × 100
-      - 시급제 초과 최대 감점: emp수 × last_day × 500
-      - 분산 최대 감점: last_day × 30 (std 최대 last_day로 가정)
-    """
-    n_emps     = max(len(employees), 1)
-    max_req    = max(required_staff.values())
-    base = (
-        last_day * len(SHIFTS) * max_req * 1000   # 인원 부족 최대치
-        + (last_day - 1) * n_emps * 100           # 마감→오픈 최대치
-        + n_emps * last_day * 500                 # 시급제 초과 최대치
-        + last_day * 30                           # 분산 최대치
-    )
-
-    score = base
+    score = _fitness_base
     wc = calc_wc(schedule)
 
     # 인원 부족/초과
@@ -619,7 +602,7 @@ def fitness(schedule):
     for i in range(len(dates) - 1):
         closing = set(schedule[dates[i]]["마감"])
         opening = set(schedule[dates[i + 1]]["오픈"])
-        score -= len(closing & opening) * 100
+        score -= len(closing & opening) * 800
 
     # 시급제 초과 근무
     for emp in employees:
@@ -652,32 +635,44 @@ def mutate(schedule, rate=0.05):
     return repair_schedule(schedule)
 
 def run_ga(on_progress=None):
+    global _fitness_base
     build_emp_index()
+
+    # base를 한 번만 계산해서 캐싱
+    n_emps  = max(len(employees), 1)
+    max_req = max(required_staff.values())
+    _fitness_base = (
+        last_day * len(SHIFTS) * max_req * 1000
+        + (last_day - 1) * n_emps * 800
+        + n_emps * last_day * 500
+        + last_day * 30
+    )
 
     pop_size   = 20
     elite_size = 5
     population = [repair_schedule(build_schedule_from_scratch()) for _ in range(pop_size)]
 
+    # (점수, 스케줄) 쌍 유지 — 엘리트는 점수 재사용으로 속도 확보
     scored = [(fitness(ind), ind) for ind in population]
     scored.sort(key=lambda x: x[0], reverse=True)
     best_score, best = scored[0]
     start = time.time()
 
-    # 0세대 (초기 집단) 기록 → 초반 급등 구간이 그래프에 보임
+    # 0세대 기록 (초반 급등 구간 확인용)
     history_best = [scored[0][0]]
     history_avg  = [sum(s for s, _ in scored) / len(scored)]
 
     for gen in range(generations):
         top_pool = [ind for _, ind in scored[:10]]
-        elites   = [ind for _, ind in scored[:elite_size]]
+        elites   = scored[:elite_size]          # 점수 재사용
 
         children = []
         while len(children) < pop_size - elite_size:
             p1, p2 = random.sample(top_pool, 2)
             children.append(mutate(crossover(p1, p2)))
 
-        # 전체 재계산 (엘리트 포함) → 점수 변화가 그래프에 정직하게 반영
-        scored = [(fitness(ind), ind) for ind in elites + children]
+        # 자식만 새로 계산, 엘리트는 재사용
+        scored = elites + [(fitness(c), c) for c in children]
         scored.sort(key=lambda x: x[0], reverse=True)
 
         if scored[0][0] > best_score:
@@ -770,7 +765,7 @@ if st.button("GA로 월간 스케줄 생성", type="primary", use_container_widt
         max_req = max(required_staff.values())
         base_score = (
             last_day * len(SHIFTS) * max_req * 1000
-            + (last_day - 1) * n_emps * 100
+            + (last_day - 1) * n_emps * 800
             + n_emps * last_day * 500
             + last_day * 30
         )
